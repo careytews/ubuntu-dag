@@ -1,0 +1,150 @@
+#!/bin/bash
+
+BASE_ISO=ubuntu-17.04-desktop-amd64.iso
+
+ISO_MOUNT=iso-mount
+ISO_EXTRACT=iso-extract
+NEW_ISO=$(pwd)/ubuntu-17.04-dag.iso
+LIVECD_FS=livecd-fs
+CYBERPROBE_PKG=ubuntu-dag-cyberprobe_1.2-1_amd64.deb
+
+echo '*** Mount ISO image...'
+mkdir -p ${ISO_MOUNT}
+mount -o loop ${BASE_ISO} ${ISO_MOUNT}
+
+echo '*** Extract ISO contents...'
+rm -rf ${ISO_EXTRACT}
+mkdir -p ${ISO_EXTRACT}
+rsync --exclude=/casper/filesystem.squashfs -a ${ISO_MOUNT}/ ${ISO_EXTRACT}
+
+echo '*** Extract LiveCD image...'
+rm -rf ${LIVECD_FS}
+unsquashfs -d ${LIVECD_FS} ${ISO_MOUNT}/casper/filesystem.squashfs
+
+umount ${ISO_MOUNT}
+rmdir ${ISO_MOUNT}
+
+echo '*** Add resources...'
+mkdir -p ${LIVECD_FS}/resources
+cp ${CYBERPROBE_PKG} ${LIVECD_FS}/resources
+cp dag-5.6.0-deb.tar.gz ${LIVECD_FS}/resources
+
+echo '*** Prepare FS...'
+rm -f ${LIVECD_FS}/run/resolvconf/resolv.conf ${LIVECD_FS}/etc/hosts
+cp /etc/resolv.conf ${LIVECD_FS}/run/resolvconf/resolv.conf
+cp /etc/hosts ${LIVECD_FS}/etc/hosts
+mount --bind /dev/ ${LIVECD_FS}/dev
+chroot ${LIVECD_FS} sh -c '
+  mount -t proc none /proc
+  mount -t sysfs none /sys
+  mount -t devpts none /dev/pts
+  add-apt-repository universe
+  apt-get update
+'
+
+echo '*** Install DAG...'
+chroot ${LIVECD_FS} sh -c '
+  apt-get install -y libhwloc5
+  cd /resources
+  tar xvfz dag-5.6.0-deb.tar.gz
+  cd deb
+  dpkg -i libntar_1.1.0_amd64.deb
+  dpkg -i dag-base_5.6.0_amd64.deb
+  dpkg -i dag-dev_5.6.0_amd64.deb
+  dpkg -i dag-utils_5.6.0_amd64.deb
+  dpkg -i dag-firmware_5.6.0_amd64.deb
+  dpkg -i dag-docs_5.6.0_amd64.deb
+  apt install -y python-dev python-libxml2
+  dpkg -i dag-python_5.6.0_amd64.deb
+  apt install -y dkms 
+  dpkg -i dag-dkms_5.6.0_amd64.deb
+  cd ..
+  rm -rf deb
+'
+
+cp dag.service ${LIVECD_FS}/lib/systemd/system/dag.service
+chroot ${LIVECD_FS} sh -c '
+  systemctl enable dag
+'
+
+echo '*** Install cyberprobe...'
+chroot ${LIVECD_FS} sh -c '
+  dpkg -i /resources/ubuntu-dag-cyberprobe_1.2-1_amd64.deb
+  systemctl enable cyberprobe
+  rm -f /resources/ubuntu-dag-cyberprobe_1.2-1_amd64.deb
+'
+
+mkdir -p ${LIVECD_FS}/tap-creds
+cp cert.ca key.tap cert.tap ${LIVECD_FS}/tap-creds
+
+cat > ${LIVECD_FS}/etc/cyberprobe.cfg <<EOT
+<?xml version="1.0" encoding="ISO-8859-1"?>
+
+<!-- Cyberprobe configuration file. -->
+<configuration>
+
+  <!-- Define network interfaces to sniff. -->
+  <interfaces>
+    <interface name="dag0"/>
+  </interfaces>
+
+  <!-- Define IP addresses or address ranges to match on. -->
+  <targets>
+    <target address="0.0.0.0/0" liid="network-tap"/> -->
+  </targets>
+
+  <!-- Define endpoints to deliver data to. -->
+  <endpoints>
+    <endpoint hostname="probe-svc.ops.trustnetworks.com" port="9001" transport="tls" type="etsi" certificate="/tap-creds/cert.tap" key="/tap-creds/key.tap" trusted-ca="/tap-creds/cert.ca"/>
+  </endpoints>
+
+</configuration>
+EOT
+
+echo '*** Cleanup...'
+chroot ${LIVECD_FS} sh -c '
+  rm -rf /tmp/* ~/.bash_history
+  umount /proc
+  umount /sys
+  umount /dev/pts
+'
+umount ${LIVECD_FS}/dev
+
+
+echo '*** Prepare manifest...'
+chmod +w ${ISO_EXTRACT}/casper/filesystem.manifest
+chroot ${LIVECD_FS} dpkg-query -W --showformat='${Package} ${Version}\n' > ${ISO_EXTRACT}/casper/filesystem.manifest
+cp ${ISO_EXTRACT}/casper/filesystem.manifest ${ISO_EXTRACT}/casper/filesystem.manifest-desktop
+sed -i '/ubiquity/d' ${ISO_EXTRACT}/casper/filesystem.manifest-desktop
+sed -i '/casper/d' ${ISO_EXTRACT}/casper/filesystem.manifest-desktop
+
+echo '*** Create LiveCD filesystem...'
+rm -f ${ISO_EXTRACT}/casper/filesystem.squashfs
+mksquashfs ${LIVECD_FS} ${ISO_EXTRACT}/casper/filesystem.squashfs -comp xz -e ${LIVECD_FS}/boot
+
+printf $(du -sx --block-size=1 ${LIVECD_FS} | cut -f1) > ${ISO_EXTRACT}/casper/filesystem.size
+
+rm -rf ${LIVECD_FS}
+
+# FIXME: Edit README.diskdefines
+
+echo '*** Create bootable ISO...'
+(
+    cd ${ISO_EXTRACT}
+    rm -f md5sum.txt
+    find -type f -print0 | xargs -0 md5sum | grep -v isolinux/boot.cat | \
+	tee md5sum.txt
+)
+
+(
+    cd ${ISO_EXTRACT}
+    mkisofs -D -r -V "UBUNTUDAG" -cache-inodes -J -l \
+            -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot \
+	    -boot-load-size 4 -boot-info-table -o - .
+) > ${NEW_ISO}
+
+rm -rf ${ISO_EXTRACT}
+
+echo '*** All done'
+
+

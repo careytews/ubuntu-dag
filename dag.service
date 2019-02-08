@@ -1,0 +1,10 @@
+
+[Unit]
+Description=Endace DAG initialisation
+Before=cyberprobe.service
+
+[Service]
+ExecStart=/bin/bash -c 'dagload; dagconfig default'
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,67 @@
+#!/bin/bash
+
+DISK_IMAGE=usb.img
+
+# Size in MB.
+USB_SIZE=4096
+
+# Partition sizes
+PART1=2G
+PART2=2G
+
+# Place to mount DOS partition
+DOS_MNT=part1-mnt
+ISO_MNT=iso-mnt
+
+# ISO image
+ISO_IMAGE=ubuntu-17.04-dag.iso
+
+# Loop device to mount disk on.
+LOOP_DEVICE=/dev/loop9
+
+echo '*** Create disk image...'
+rm -f disk.img
+dd if=/dev/zero of=${DISK_IMAGE} bs=1M count=${USB_SIZE}
+
+echo '*** Apply partition table...'
+sfdisk --delete ${DISK_IMAGE}
+sfdisk ${DISK_IMAGE} <<EOT
+unit: sectors
+label: dos
+
+-,+${PART1},L,*
+-,+${PART2},L,-
+EOT
+losetup -P ${LOOP_DEVICE} ${DISK_IMAGE}
+
+echo '*** Create DOS filesystem...'
+mkfs.vfat -F 32 -c ${LOOP_DEVICE}p1
+
+echo '*** Mount DOS filesystem...'
+mkdir -p ${DOS_MNT}
+mount ${LOOP_DEVICE}p1 ${DOS_MNT}
+
+echo '*** Install grub2...'
+grub2-install --root-directory=$(pwd)/${DOS_MNT} ${LOOP_DEVICE}
+
+echo '*** Add boot files from ISO...'
+mkdir ${ISO_MNT}
+mount -o loop ${ISO_IMAGE} ${ISO_MNT}
+cp -f ${ISO_MNT}/casper/{vmlinuz.efi,initrd.lz} ${DOS_MNT}/boot/
+cp grub.cfg ${DOS_MNT}/boot/grub2/
+umount ${ISO_MNT}
+rmdir ${ISO_MNT}
+
+echo '*** Unmount DOS filesystem...'
+umount ${DOS_MNT}
+rmdir ${DOS_MNT}
+
+echo '*** Copy ISO image to disk image...'
+dd if=${ISO_IMAGE} of=${LOOP_DEVICE}p2 bs=4M
+losetup -d ${LOOP_DEVICE}
+
+echo '*** All done'
+
+
+
+
